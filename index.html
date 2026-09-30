@@ -1,0 +1,261 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Lily · Glow Med Spa</title>
+  <style>
+    :root {
+      --bg: #fbf7f4;
+      --card: #ffffff;
+      --ink: #2d2a32;
+      --muted: #8a8490;
+      --accent: #c9828f;
+      --accent-dark: #a9616e;
+      --live: #d9534f;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      padding: 16px;
+      background: var(--bg);
+      color: var(--ink);
+      font-family: system-ui, -apple-system, "Segoe UI", sans-serif;
+    }
+    main {
+      width: 100%;
+      max-width: 480px;
+      background: var(--card);
+      border-radius: 20px;
+      padding: 32px 24px;
+      box-shadow: 0 10px 40px rgba(0, 0, 0, 0.06);
+      text-align: center;
+    }
+    h1 { margin: 0 0 4px; font-size: 1.6rem; font-weight: 600; }
+    .sub { margin: 0 0 28px; color: var(--muted); }
+    #mic {
+      width: 112px;
+      height: 112px;
+      border-radius: 50%;
+      border: none;
+      background: var(--accent);
+      color: #fff;
+      cursor: pointer;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      transition: background 0.2s, transform 0.1s;
+    }
+    #mic:hover { background: var(--accent-dark); }
+    #mic:active { transform: scale(0.96); }
+    #mic:disabled { opacity: 0.6; cursor: wait; }
+    #mic.live { background: var(--live); animation: pulse 1.6s infinite; }
+    #mic svg { width: 44px; height: 44px; }
+    @keyframes pulse {
+      0% { box-shadow: 0 0 0 0 rgba(217, 83, 79, 0.45); }
+      70% { box-shadow: 0 0 0 22px rgba(217, 83, 79, 0); }
+      100% { box-shadow: 0 0 0 0 rgba(217, 83, 79, 0); }
+    }
+    #status { margin: 18px 0 20px; min-height: 1.4em; color: var(--muted); }
+    #transcript {
+      text-align: left;
+      max-height: 280px;
+      overflow-y: auto;
+      border-top: 1px solid #eee;
+      padding-top: 12px;
+    }
+    .line { margin: 8px 0; line-height: 1.4; }
+    .line b { color: var(--accent-dark); }
+    .line.user b { color: var(--muted); }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Lily</h1>
+    <p class="sub">Glow Med Spa voice receptionist</p>
+    <button id="mic" aria-label="Start talking to Lily">
+      <svg viewBox="0 0 24 24" fill="currentColor" aria-hidden="true">
+        <path d="M12 14a3 3 0 0 0 3-3V5a3 3 0 0 0-6 0v6a3 3 0 0 0 3 3zm5-3a5 5 0 0 1-10 0H5a7 7 0 0 0 6 6.92V21h2v-3.08A7 7 0 0 0 19 11h-2z"/>
+      </svg>
+    </button>
+    <div id="status">Tap the mic to talk to Lily</div>
+    <div id="transcript"></div>
+  </main>
+
+  <script>
+    const micBtn = document.getElementById('mic');
+    const statusEl = document.getElementById('status');
+    const transcriptEl = document.getElementById('transcript');
+
+    const INPUT_RATE = 16000;   // Gemini expects 16 kHz PCM16 in
+    const OUTPUT_RATE = 24000;  // Gemini returns 24 kHz PCM16 out
+
+    let ws, micStream, captureCtx, workletNode, playCtx;
+    let playHead = 0;
+    let playing = [];
+    let live = false;
+    let lastLine = null;
+
+    // Captures mic audio, downsamples to 16 kHz and posts Int16 PCM chunks (~100 ms).
+    const workletSrc = `
+      class PcmCapture extends AudioWorkletProcessor {
+        constructor() {
+          super();
+          this.ratio = sampleRate / ${INPUT_RATE};
+          this.buf = [];
+          this.pos = 0;
+        }
+        process(inputs) {
+          const ch = inputs[0][0];
+          if (!ch) return true;
+          for (; this.pos < ch.length; this.pos += this.ratio) {
+            const s = Math.max(-1, Math.min(1, ch[Math.floor(this.pos)]));
+            this.buf.push(s < 0 ? s * 0x8000 : s * 0x7fff);
+          }
+          this.pos -= ch.length;
+          if (this.buf.length >= ${INPUT_RATE / 10}) {
+            this.port.postMessage(Int16Array.from(this.buf).buffer, []);
+            this.buf = [];
+          }
+          return true;
+        }
+      }
+      registerProcessor('pcm-capture', PcmCapture);
+    `;
+
+    function setStatus(text) { statusEl.textContent = text; }
+
+    function addTranscript(role, text) {
+      // Transcriptions arrive in fragments; append to the current line while the speaker is unchanged.
+      if (lastLine && lastLine.dataset.role === role) {
+        lastLine.querySelector('span').textContent += text;
+      } else {
+        lastLine = document.createElement('div');
+        lastLine.className = 'line ' + role;
+        lastLine.dataset.role = role;
+        lastLine.innerHTML = '<b></b> <span></span>';
+        lastLine.querySelector('b').textContent = role === 'user' ? 'You:' : 'Lily:';
+        lastLine.querySelector('span').textContent = text;
+        transcriptEl.appendChild(lastLine);
+      }
+      transcriptEl.scrollTop = transcriptEl.scrollHeight;
+    }
+
+    function playPcm(base64) {
+      const bytes = Uint8Array.from(atob(base64), (c) => c.charCodeAt(0));
+      const pcm = new Int16Array(bytes.buffer);
+      const floats = new Float32Array(pcm.length);
+      for (let i = 0; i < pcm.length; i++) floats[i] = pcm[i] / 0x8000;
+
+      const buffer = playCtx.createBuffer(1, floats.length, OUTPUT_RATE);
+      buffer.copyToChannel(floats, 0);
+      const src = playCtx.createBufferSource();
+      src.buffer = buffer;
+      src.connect(playCtx.destination);
+
+      playHead = Math.max(playHead, playCtx.currentTime);
+      src.start(playHead);
+      playHead += buffer.duration;
+      playing.push(src);
+      src.onended = () => { playing = playing.filter((s) => s !== src); };
+    }
+
+    function stopPlayback() {
+      playing.forEach((s) => { try { s.stop(); } catch {} });
+      playing = [];
+      playHead = 0;
+    }
+
+    async function start() {
+      micBtn.disabled = true;
+      setStatus('Connecting…');
+      try {
+        micStream = await navigator.mediaDevices.getUserMedia({
+          audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true },
+        });
+      } catch (err) {
+        setStatus('Microphone access was blocked.');
+        micBtn.disabled = false;
+        return;
+      }
+
+      playCtx = new AudioContext({ sampleRate: OUTPUT_RATE });
+      captureCtx = new AudioContext();
+      const url = URL.createObjectURL(new Blob([workletSrc], { type: 'application/javascript' }));
+      await captureCtx.audioWorklet.addModule(url);
+
+      const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+      ws = new WebSocket(`${proto}://${location.host}/live`);
+
+      ws.onmessage = (event) => {
+        const msg = JSON.parse(event.data);
+        switch (msg.type) {
+          case 'ready':
+            startMic();
+            break;
+          case 'audio':
+            playPcm(msg.data);
+            setStatus('Lily is speaking…');
+            break;
+          case 'transcript':
+            addTranscript(msg.role, msg.text);
+            break;
+          case 'interrupted':
+            stopPlayback();
+            break;
+          case 'turnComplete':
+            setStatus('Listening…');
+            break;
+          case 'error':
+            setStatus('Error: ' + msg.message);
+            break;
+        }
+      };
+      ws.onclose = () => stop('Call ended. Tap the mic to start again.');
+      ws.onerror = () => setStatus('Connection error. Is the server running?');
+    }
+
+    function startMic() {
+      const source = captureCtx.createMediaStreamSource(micStream);
+      workletNode = new AudioWorkletNode(captureCtx, 'pcm-capture');
+      workletNode.port.onmessage = (e) => {
+        if (ws && ws.readyState === WebSocket.OPEN) ws.send(e.data);
+      };
+      source.connect(workletNode);
+
+      live = true;
+      micBtn.disabled = false;
+      micBtn.classList.add('live');
+      micBtn.setAttribute('aria-label', 'Hang up');
+      setStatus('Listening… say hi to Lily');
+    }
+
+    function stop(message) {
+      if (!live && !ws) return;
+      live = false;
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send(JSON.stringify({ type: 'audioStreamEnd' }));
+        ws.close();
+      }
+      ws = null;
+      workletNode?.disconnect();
+      micStream?.getTracks().forEach((t) => t.stop());
+      captureCtx?.close();
+      stopPlayback();
+      playCtx?.close();
+      lastLine = null;
+
+      micBtn.disabled = false;
+      micBtn.classList.remove('live');
+      micBtn.setAttribute('aria-label', 'Start talking to Lily');
+      setStatus(message || 'Tap the mic to talk to Lily');
+    }
+
+    micBtn.addEventListener('click', () => (live ? stop() : start()));
+  </script>
+</body>
+</html>

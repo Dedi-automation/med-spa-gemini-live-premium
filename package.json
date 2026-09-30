@@ -1,0 +1,21 @@
+{
+  "name": "med-spa-gemini-live",
+  "version": "1.0.0",
+  "description": "Gemini Live voice receptionist demo for a med spa (Lily)",
+  "main": "server.js",
+  "type": "module",
+  "private": true,
+  "scripts": {
+    "start": "node server.js",
+    "dev": "node --watch server.js"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "dependencies": {
+    "@google/genai": "^2.24.0",
+    "dotenv": "^18.0.4",
+    "express": "^5.2.1",
+    "ws": "^8.22.0"
+  }
+}
