@@ -141,3 +141,12 @@ dist
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
 .vite/
+
+# Keep the env template in the repo
+!.env.example
+
+# OS files
+.DS_Store
+
+# Google Cloud service-account keys
+med-spa-gemini-live-*.json
