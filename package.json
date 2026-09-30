@@ -1,5 +1,5 @@
 {
-  "name": "med-spa-gemini-live",
+  "name": "med-spa-gemini-live-premium",
   "version": "1.0.0",
   "description": "Gemini Live voice receptionist demo for a med spa (Lily)",
   "main": "server.js",
