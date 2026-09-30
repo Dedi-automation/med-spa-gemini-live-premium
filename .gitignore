@@ -147,3 +147,6 @@ vite.config.ts.timestamp-*
 
 # OS files
 .DS_Store
+
+# Google Cloud service-account keys
+med-spa-gemini-live-*.json
